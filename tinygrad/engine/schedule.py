@@ -1,11 +1,11 @@
-import sys, pickle, atexit, importlib
+import sys, pickle, atexit, uuid, contextlib
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from typing import Tuple, List, Dict, Optional, Set, DefaultDict, cast, get_args
 from tinygrad.ops import MetaOps, BufferOps, LazyOp, Op, ReduceOps, ConstBuffer, MemBuffer, UNSAFE_PAD_OPS, UnaryOps, reduce_st
 from tinygrad.engine.graph import log_lazybuffer, realized_lazybuffer
 from tinygrad.helpers import GRAPH, DEBUG, MULTIOUTPUT, SAVE_SCHEDULE, FUSE_CONV_BW, FUSE_ARANGE, \
-                             GlobalCounters, colored, prod, dedup, all_int, merge_dicts, getenv, Metadata
+                             GlobalCounters, colored, diskcache_put, prod, dedup, all_int, merge_dicts, getenv, Metadata
 from tinygrad.shape.symbolic import Variable, sint
 from tinygrad.dtype import ConstType, ImageDType, dtypes
 from tinygrad.lazy import LazyBuffer
@@ -374,6 +374,9 @@ def _graph_schedule(outs:List[LazyBuffer], seen:Set[LazyBuffer]) -> \
       with open(fp, "wb") as f: pickle.dump(SCHEDULES, f)
     if len(SCHEDULES) == 0: atexit.register(_save)
     SCHEDULES.append((graph, in_degree))
+  if getenv("RUN_PROCESS_REPLAY"):
+    # TODO: deal with weakrefs
+    with contextlib.suppress(Exception): diskcache_put("schedule_diff", str(uuid.uuid4()), (outs, list(in_degree)))
   return graph, in_degree
 
 # *** DAG ordering: breadth first search ***
@@ -381,10 +384,6 @@ def _graph_schedule(outs:List[LazyBuffer], seen:Set[LazyBuffer]) -> \
 def create_schedule_with_vars(outs:List[LazyBuffer], seen:Optional[Set[LazyBuffer]]=None) -> Tuple[List[ScheduleItem], Dict[Variable, int]]:
   if seen is None: seen = set()
   graph, in_degree = _graph_schedule(outs, seen)
-  if getenv("RUN_PROCESS_REPLAY"):
-    try: importlib.import_module("test.external.process_replay.diff_schedule").process_replay(outs, graph, in_degree)
-    except (ImportError, AttributeError): print("can't access test.external.process_replay.diff_schedule, hint: process relpay needs PYTHONPATH=.")
-
   queue = deque(lsi for lsi,deg in in_degree.items() if deg == 0)
   schedule: List[ScheduleItem] = []
   var_vals: Dict[Variable, int] = {}

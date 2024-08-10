@@ -1,24 +1,13 @@
 # create a diff of two schedule graphs
-import shutil, importlib, uuid, os, logging
+import logging
 from collections import defaultdict
 from typing import DefaultDict, List, Set, Tuple
 from test.external.process_replay.utils import print_diff
 from tinygrad.engine.schedule import LBScheduleItem, ScheduleItem
-from tinygrad.helpers import DEBUG, Context, colored, dedup, diskcache_put, fetch, getenv
+from tinygrad.helpers import DEBUG, Context, colored, dedup, getenv
 from tinygrad.lazy import LazyBuffer
 from tinygrad.ops import LazyOp
 from tinygrad.engine.realize import CompiledRunner, lower_schedule_item
-
-def process_replay(outs:List[LazyBuffer], graph:DefaultDict[LBScheduleItem, List[LBScheduleItem]], in_degree:DefaultDict[LBScheduleItem, int]):
-  # copy the reference module
-  ref_schedule = getenv("REF_COMMIT_HASH", "master")
-  fp = __file__.replace("diff_schedule", "master_schedule")
-  if not os.path.isfile(fp):
-    shutil.copyfile(fetch(f"https://raw.githubusercontent.com/tinygrad/tinygrad/{ref_schedule}/tinygrad/engine/schedule.py"), fp)
-  # create the reference graph
-  ref_graph, ref_in_degree = importlib.import_module("test.external.process_replay.master_schedule")._graph_schedule(outs, set())
-  # compare
-  diff_schedule([(ref_graph, ref_in_degree), (graph, in_degree)])
 
 def diff_schedule(s:List[Tuple[DefaultDict[LBScheduleItem, List[LBScheduleItem]], DefaultDict[LBScheduleItem, int]]]) -> int:
   si_for_buf: DefaultDict[LazyBuffer, List[ScheduleItem]] = defaultdict(list)
@@ -35,7 +24,6 @@ def diff_schedule(s:List[Tuple[DefaultDict[LBScheduleItem, List[LBScheduleItem]]
     if asts in seen_diffs: continue
     seen_diffs.add(asts)
     changed += 1
-    if getenv("RUN_PROCESS_REPLAY"): diskcache_put("schedule_diff", str(uuid.uuid4()), (str(buf), asts))
     if len(asts) == 1:
       print(f"{buf} folded in the second schedule")
     else: print_si_diff(si[0], si[1])

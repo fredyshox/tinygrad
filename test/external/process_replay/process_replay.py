@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Dict, List, cast
 from test.external.process_replay.utils import print_diff
 from tinygrad.codegen.kernel import Kernel
+from tinygrad.engine.schedule import _graph_schedule
 from tinygrad.helpers import Context, ContextVar, colored, db_connection, VERSION, getenv, temp, tqdm
 
 # *** process replay settings
@@ -68,16 +69,22 @@ def diff_kernel(offset:int, kernel_changed):
   conn.commit()
   cur.close()
 
-def print_ast_diff(offset:int):
+def diff_schedule(offset:int, schedule_changed):
   conn = db_connection()
   cur = conn.cursor()
   cur.execute(f"SELECT val FROM 'schedule_diff_{VERSION}' LIMIT ? OFFSET ?", (PAGE_SIZE, offset))
-  for row in cur.fetchall():
-    buf, asts = pickle.loads(row[0])
-    if len(asts) == 1:
-      logging.info(f"{buf} was folded")
-      logging.info(asts[0])
-    else: print_diff(asts[0], asts[1])
+  for val in cur.fetchall():
+    outs, compare_lsi = pickle.loads(val[0])
+    ref_asts = {x:lsi.ast for lsi in _graph_schedule(outs, set())[1] for x in lsi.outputs}
+    for compare in compare_lsi:
+      for buf in compare.outputs:
+        ref_ast = ref_asts.get(buf)
+        if ref_ast is None:
+          logging.info(f"{buf} was folded")
+          logging.info(compare.ast)
+        elif compare.ast == ref_ast: continue
+        schedule_changed.value = True
+        print_diff(compare.ast, ref_ast)
 
 def download_artifact(run_id:str, name:str, dest:str):
   res = requests.get(f"{BASE_URL}/actions/runs/{run_id}/artifacts?name={name}", headers=GH_HEADERS)
@@ -102,7 +109,8 @@ def process_replay():
   # *** speed diff (for benchmarks)
   if REF == "update_benchmark":
     name = {"testmacbenchmark": "Mac", "testnvidiabenchmark": "tinybox green", "testmorenvidiabenchmark": "tinybox green Training",
-            "testamdbenchmark": "tinybox red", "testmoreamdbenchmark": "tinybox red Training"}[os.environ["GITHUB_JOB"]]
+            "testamdbenchmark": "tinybox red", "testmoreamdbenchmark": "tinybox red Training",
+            "testqualcommbenchmark": "comma Benchmark"}[os.environ["GITHUB_JOB"]]
     compare_jobs = requests.get(f"{BASE_URL}/actions/runs/{RUN_ID}/jobs", headers=GH_HEADERS).json()["jobs"]
     compare_job = next(j for j in compare_jobs if j["name"] == f"{name} Benchmark")
     ref_runs = requests.get(f"{BASE_URL}/actions/workflows/benchmark.yml/runs?per_page=1&branch=master&status=success", headers=GH_HEADERS).json()
@@ -118,21 +126,19 @@ def process_replay():
   if COMPARE_SCHEDULE:
     conn = db_connection()
     cur = conn.cursor()
-    try: has_diff = cur.execute(f"select name from sqlite_master where type='table' and name='schedule_diff_{VERSION}'").fetchone()
+    try: row_count = cur.execute(f"select count(*) from 'schedule_diff_{VERSION}'").fetchone()[0]
     except sqlite3.OperationalError:
       logging.warning(f"schedule_diff_{VERSION} isn't accessible in master, did DB_VERSION change?")
       exit(0)
-    if has_diff:
-      row_count = cur.execute(f"select count(*) from 'schedule_diff_{VERSION}'").fetchone()[0]
-      conn.commit()
-      cur.close()
-      processes = []
-      changed = multiprocessing.Manager().Value('b', False)
-      for i in tqdm(range(0, row_count, PAGE_SIZE)):
-        processes.append(p:=multiprocessing.Process(target=print_ast_diff, args=(i,)))
-        p.start()
-      for p in processes: p.join()
-      if ASSERT_DIFF: raise Exception("scheduler process replay detected changes")
+    conn.commit()
+    cur.close()
+    processes = []
+    changed = multiprocessing.Manager().Value('b', False)
+    for i in tqdm(range(0, row_count, PAGE_SIZE)):
+      processes.append(p:=multiprocessing.Process(target=diff_schedule, args=(i, changed)))
+      p.start()
+    for p in processes: p.join()
+    if changed.value and ASSERT_DIFF: raise Exception("scheduler process replay detected changes")
 
   # *** kernel diff
   conn = db_connection()
@@ -152,9 +158,8 @@ def process_replay():
   if changed.value and ASSERT_DIFF: raise Exception("kernel process replay detected changes")
 
 if __name__ == "__main__":
+  os.environ["RUN_PROCESS_REPLAY"] = "0"
   if SKIP_PROCESS_REPLAY:
     logging.info("skipping process replay.")
     exit(0)
-  try: process_replay()
-  except Exception as e:
-    if ASSERT_DIFF: raise e
+  process_replay()
