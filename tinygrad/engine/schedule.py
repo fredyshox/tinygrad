@@ -1,4 +1,4 @@
-import sys, pickle, atexit, importlib, contextlib
+import sys, pickle, atexit, importlib, contextlib, heapq, itertools
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from typing import Tuple, List, Dict, Optional, Set, DefaultDict, get_args
@@ -383,12 +383,20 @@ def create_schedule_with_vars(outs:List[LazyBuffer], seen:Optional[Set[LazyBuffe
     # NOTE: process relpay needs PYTHONPATH=., remove this once it just pickles LazyBuffers
     with contextlib.suppress(Exception): importlib.import_module("test.external.process_replay.diff_schedule").process_replay(outs, graph, in_degree)
 
-  queue = deque(lsi for lsi,deg in in_degree.items() if deg == 0)
+  queue: List[Tuple[int, int, LBScheduleItem]] = []
+  counter = itertools.count()
+  def push(lsi:LBScheduleItem):
+    priority = 0
+    heapq.heappush(queue, (priority, next(counter), lsi))
+  for lsi,d in in_degree.items():
+    if d == 0: push(lsi)
+
   schedule: List[ScheduleItem] = []
   var_vals: Dict[Variable, int] = {}
   kernel_number = GlobalCounters.kernel_count
   while queue:
-    lsi = queue.popleft()
+    p,_,lsi = heapq.heappop(queue)
+    if DEBUG >= 7: print(p, lsi.ast)
     for buf in lsi.outputs: seen.add(buf)
     if GRAPH:
       kernel_number += 1
@@ -399,7 +407,7 @@ def create_schedule_with_vars(outs:List[LazyBuffer], seen:Optional[Set[LazyBuffe
     if logops and si.ast.op is MetaOps.KERNEL and not any(i.device.startswith("DISK:") for i in si.inputs): logops.write(str(si.ast)+"\n")
     for x in graph[lsi]:
       in_degree[x] -= 1
-      if in_degree[x] == 0: queue.append(x)
+      if in_degree[x] == 0: push(x)
 
   # confirm everything was scheduled correctly
   if any(degree != 0 for degree in in_degree.values()) or len(in_degree) != len(schedule):
